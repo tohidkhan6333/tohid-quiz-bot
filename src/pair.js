@@ -1,7 +1,10 @@
 require('dotenv').config();
 const inquirer = require('inquirer');
 const chalk = require('chalk');
-const { default: makeWASocket, useMultiFileAuthState, Browsers } = require('@whiskeysockets/baileys');
+const qrcode = require('qrcode-terminal'); // ✅ नई लाइब्रेरी जोड़ें
+const { default: makeWASocket, useSingleFileAuthState, Browsers } = require('@whiskeysockets/baileys');
+const fs = require('fs');
+const path = require('path');
 const config = require('./config');
 
 console.log(chalk.blue.bold(`
@@ -13,146 +16,106 @@ console.log(chalk.blue.bold(`
 
 async function pairBot() {
     try {
-        console.log(chalk.cyan('📱 Starting pairing process...\n'));
-        
-        // Ask for phone number if not in env
-        const questions = [];
-        
-        if (!config.OWNER_NUMBER) {
-            questions.push({
-                type: 'input',
-                name: 'phoneNumber',
-                message: 'Enter your WhatsApp number (with country code):',
-                validate: (input) => {
-                    return input.startsWith('+') && input.length > 10 
-                        ? true 
-                        : 'Please enter a valid phone number with country code (e.g., +919876543210)';
-                }
-            });
-        }
-        
-        const answers = await inquirer.prompt(questions);
-        const phoneNumber = config.OWNER_NUMBER || answers.phoneNumber;
-        
-        console.log(chalk.yellow(`\n📞 Using phone number: ${phoneNumber}`));
-        
-        // Initialize auth state
-        const { state, saveCreds } = await useMultiFileAuthState('tohid_auth');
-        
+        console.log(chalk.cyan('📱 Starting QR Code pairing...\n'));
+
+        // 🔄 Single File Auth State का उपयोग
+        const authFile = './auth.json';
+        const { state, saveState } = useSingleFileAuthState(authFile);
+
         // Create socket for pairing
         const sock = makeWASocket({
-            auth: {
-                creds: state.creds,
-                keys: state.keys
-            },
-            printQRInTerminal: false,
+            auth: state,
+            printQRInTerminal: true, // ✅ टर्मिनल में QR दिखाएगा
             browser: Browsers.ubuntu('Chrome'),
             markOnlineOnConnect: false
         });
-        
+
         // Save credentials when updated
-        sock.ev.on('creds.update', saveCreds);
-        
+        sock.ev.on('creds.update', saveState);
+
         // Handle connection events
         sock.ev.on('connection.update', async (update) => {
-            const { connection, qr, isNewLogin } = update;
-            
+            const { connection, qr } = update;
+
+            if (qr) {
+                // ✅ QR कोड टर्मिनल पर दिखाएं
+                console.log(chalk.yellow.bold('\n📲 Scan this QR Code with your phone:'));
+                qrcode.generate(qr, { small: true });
+                console.log(chalk.cyan('\n📋 Instructions:'));
+                console.log(chalk.white('1. Open WhatsApp on your phone'));
+                console.log(chalk.white('2. Tap on ⋮ (Menu) → Linked Devices'));
+                console.log(chalk.white('3. Tap on "Link a Device"'));
+                console.log(chalk.white('4. Scan the QR code above\n'));
+            }
+
             if (connection === 'connecting') {
                 console.log(chalk.blue('🔄 Connecting to WhatsApp servers...'));
             }
-            
+
             if (connection === 'open') {
                 console.log(chalk.green('✅ Connected to WhatsApp!'));
-                
+                saveState();
+
                 // Get bot info
                 const botJid = sock.user?.id;
                 const botNumber = botJid?.split('@')[0];
-                
+
                 if (botNumber) {
-                    console.log(chalk.green(`🤖 Bot Number: ${botNumber}`));
+                    console.log(chalk.green(`🤖 Your bot is using number: ${botNumber}`));
                 }
-                
-                // Send test message
-                try {
-                    await sock.sendMessage(phoneNumber + '@s.whatsapp.net', {
-                        text: `✅ *${config.BOT_NAME} Paired Successfully!*\n\n🤖 Bot is now ready to use!\n🕒 ${new Date().toLocaleString()}`
-                    });
-                    console.log(chalk.green('📨 Test message sent to owner!'));
-                } catch (error) {
-                    console.log(chalk.yellow('⚠️ Could not send test message'));
-                }
-                
+
+                // 🔄 auth.json की सामग्री दिखाएँ
                 console.log(chalk.green.bold('\n🎉 Pairing completed successfully!'));
-                console.log(chalk.cyan('💡 You can now start the bot with: npm start'));
-                
+                console.log(chalk.cyan.bold('\n══════════════════════════════════════'));
+                console.log(chalk.cyan.bold('📋 COPY THE AUTH DATA BELOW FOR RENDER:'));
+                console.log(chalk.cyan.bold('══════════════════════════════════════\n'));
+
+                const authData = fs.readFileSync(path.resolve(authFile), 'utf8');
+                console.log(chalk.white(authData));
+
+                console.log(chalk.cyan.bold('\n══════════════════════════════════════'));
+                console.log(chalk.cyan('💡 Copy ALL text above (from { to })'));
+                console.log(chalk.cyan('   and paste it as SESSION_DATA in Render'));
+                console.log(chalk.cyan.bold('══════════════════════════════════════\n'));
+
+                console.log(chalk.cyan('🚀 You can now deploy the bot to Render.'));
+
+                // Auto-exit after some time
                 setTimeout(() => {
                     console.log(chalk.blue('\n🔄 Closing pairing session...'));
                     sock.end();
                     process.exit(0);
-                }, 3000);
+                }, 15000);
             }
-            
+
             if (connection === 'close') {
-                console.log(chalk.red('❌ Connection closed unexpectedly'));
+                console.log(chalk.red('❌ Connection closed. Please try again.'));
                 process.exit(1);
             }
-            
-            if (isNewLogin) {
-                console.log(chalk.yellow('⚠️ New login detected'));
-            }
         });
-        
-        // Request pairing code
-        console.log(chalk.cyan('\n🔐 Requesting pairing code...'));
-        
-        try {
-            const code = await sock.requestPairingCode(phoneNumber.replace('+', ''));
-            
-            console.log(chalk.green.bold('\n══════════════════════════════════════'));
-            console.log(chalk.green.bold(`✅ Pairing Code: ${code}`));
-            console.log(chalk.green.bold('══════════════════════════════════════\n'));
-            
-            console.log(chalk.cyan('📋 Instructions:'));
-            console.log(chalk.white('1. Open WhatsApp on your phone'));
-            console.log(chalk.white('2. Go to Settings → Linked Devices'));
-            console.log(chalk.white('3. Tap on "Link a Device"'));
-            console.log(chalk.white(`4. Enter this code: ${chalk.green.bold(code)}`));
-            console.log(chalk.white('5. Wait for confirmation...\n'));
-            
-            console.log(chalk.yellow('⏳ Waiting for pairing confirmation...'));
-            console.log(chalk.gray('(Press Ctrl+C to cancel)'));
-            
-        } catch (error) {
-            console.error(chalk.red('❌ Failed to get pairing code:'), error.message);
-            
-            if (error.message.includes('not authorized')) {
-                console.log(chalk.yellow('\n💡 Solution:'));
-                console.log(chalk.white('1. Make sure the phone number is correct'));
-                console.log(chalk.white('2. Ensure WhatsApp is installed on that number'));
-                console.log(chalk.white('3. Try again in a few minutes'));
-            }
-            
-            sock.end();
-            process.exit(1);
-        }
-        
+
         // Handle process termination
         process.on('SIGINT', async () => {
-            console.log(chalk.yellow('\n\n🛑 Pairing cancelled by user'));
-            await sock.end();
+            console.log(chalk.yellow('\n🛑 Pairing cancelled by user'));
+            sock.end();
             process.exit(0);
         });
-        
+
     } catch (error) {
         console.error(chalk.red('❌ Pairing failed:'), error);
         process.exit(1);
     }
 }
 
-// Check if phone number is provided
-if (!config.OWNER_NUMBER) {
-    console.log(chalk.yellow('⚠️ OWNER_NUMBER not found in .env file'));
-    console.log(chalk.cyan('💡 You can add it to .env or enter it now\n'));
+// ✅ नई dependency जोड़ें
+console.log(chalk.yellow('⚠️  Installing qrcode-terminal...'));
+const { execSync } = require('child_process');
+try {
+    execSync('npm install qrcode-terminal --no-save', { stdio: 'inherit' });
+    console.log(chalk.green('✅ qrcode-terminal installed.'));
+} catch (e) {
+    console.log(chalk.yellow('⚠️  Could not install automatically. Please run:'));
+    console.log(chalk.white('   npm install qrcode-terminal'));
 }
 
 pairBot();
